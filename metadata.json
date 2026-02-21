@@ -1,0 +1,5 @@
+{
+  "name": "Warehouse Operational Intelligence AI",
+  "description": "A sophisticated multi-agent system for warehouse performance monitoring, data validation, KPI calculation, rule-based alerts, and corrective action generation.",
+  "requestFramePermissions": []
+}

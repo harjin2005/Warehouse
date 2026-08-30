@@ -25,12 +25,16 @@ async def _make_user(raw_session, tenant_id, email):
 
 
 async def test_tenant_scoped_session_only_sees_own_tenant_rows(
-    db_engine, raw_session, tenant_a_id, tenant_b_id, monkeypatch
+    runtime_engine, raw_session, tenant_a_id, tenant_b_id, monkeypatch
 ):
     await _make_user(raw_session, tenant_a_id, "a@tenanta.com")
     await _make_user(raw_session, tenant_b_id, "b@tenantb.com")
 
-    monkeypatch.setattr(app_db, "_engine", db_engine)
+    # Point tenant_scoped_session at the restricted, non-superuser
+    # warehouse_runtime role -- not the TestContainers superuser -- so this
+    # test actually proves RLS enforcement instead of passing vacuously
+    # because the connecting role was exempt from RLS.
+    monkeypatch.setattr(app_db, "_engine", runtime_engine)
     monkeypatch.setattr(app_db, "_session_factory", None)
 
     from app.models.user import User
@@ -48,7 +52,7 @@ async def test_tenant_scoped_session_only_sees_own_tenant_rows(
 
 
 async def test_session_without_tenant_id_set_sees_no_rows(
-    db_engine, raw_session, tenant_a_id
+    runtime_engine, raw_session, tenant_a_id
 ):
     await _make_user(raw_session, tenant_a_id, "c@tenanta.com")
 
@@ -56,7 +60,10 @@ async def test_session_without_tenant_id_set_sees_no_rows(
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    # Connect as warehouse_runtime (non-superuser, non-BYPASSRLS) -- a
+    # superuser connection would see all rows regardless of app.tenant_id
+    # ever being set, which is exactly the gap this fix closes.
+    factory = async_sessionmaker(runtime_engine, expire_on_commit=False)
     async with factory() as session:
         async with session.begin():
             result = await session.execute(select(User))

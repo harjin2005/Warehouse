@@ -65,6 +65,16 @@ app-layer `WHERE` clauses). This is the standard, auditable pattern for B2B SaaS
 defensible in an enterprise security questionnaire, and migrations stay a single operation
 instead of an N-tenant fan-out.
 
+**Two DB roles, not one.** Postgres superusers bypass RLS unconditionally, regardless of
+`FORCE ROW LEVEL SECURITY` — so the role the running application connects as must never be a
+superuser, or the policy is decorative. `warehouse_migrator` (superuser-equivalent, can
+`CREATE ROLE`/`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`) is used only by Alembic at deploy
+time. `warehouse_runtime` (plain `LOGIN`, no `BYPASSRLS`, no superuser, granted only
+table-level DML) is the role the FastAPI app actually connects as for every request — this is
+the role RLS policies are written to restrict. It is additionally granted membership in the
+narrow `app_bypass_auth` role (BYPASSRLS) used only for the cross-tenant login lookup, switched
+to via `SET ROLE`/`RESET ROLE` for that single query.
+
 ## Data model (core tables)
 
 - `tenants` — id, name, plan, created_at

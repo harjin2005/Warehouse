@@ -12,6 +12,7 @@ from alembic import command
 from alembic.config import Config
 
 import app.config as app_config
+import app.db as app_db
 
 # Test-only password for the `warehouse_runtime` role created by migration
 # 0003 against the ephemeral TestContainers instance. Never used outside
@@ -56,10 +57,19 @@ def runtime_database_url(database_url) -> str:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def run_migrations(database_url):
+def run_migrations(database_url, runtime_database_url):
     app_config.get_settings.cache_clear()
 
-    os.environ["DATABASE_URL"] = database_url
+    # `DATABASE_URL` is what `app.config.Settings.database_url` resolves to,
+    # which is what `app.db.get_engine()` uses for every ordinary request --
+    # including the full ASGI app exercised end-to-end in test_auth.py. It
+    # must point at the restricted `warehouse_runtime` role, never the
+    # TestContainers superuser: pointing it at the superuser would make
+    # every RLS policy silently decorative for any test that hits the real
+    # app instead of monkeypatching app.db._engine directly (as
+    # test_tenant_isolation.py does), which defeats the entire point of
+    # testing against real Postgres with RLS enforced.
+    os.environ["DATABASE_URL"] = runtime_database_url
     # Migrations (including 0003, which creates warehouse_runtime) must run
     # as the elevated TestContainers superuser -- that's what
     # migration_database_url needs to point at in this environment. This is
@@ -69,7 +79,33 @@ def run_migrations(database_url):
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(cfg, "head")
+    app_config.get_settings.cache_clear()
     yield
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_app_db_engine_state():
+    """Guarantee `app.db`'s cached engine/session factory are rebuilt fresh
+    for every test.
+
+    `app.db._engine`/`_session_factory` are process-global singletons, but
+    this suite's asyncio loop scope is per-function (see pyproject.toml's
+    `asyncio_default_fixture_loop_scope`), so each test runs on its own
+    event loop. An asyncpg connection pool created against one test's loop
+    breaks with "Event loop is closed" if a later test's (different) loop
+    tries to reuse it. `test_tenant_isolation.py` sidesteps this by
+    monkeypatching `_engine` directly every test; `test_auth.py` exercises
+    the real app end-to-end and relies on `app.db.get_engine()` building
+    its own engine lazily, so it needs this reset instead.
+    """
+    app_db._engine = None
+    app_db._session_factory = None
+    yield
+    engine = app_db._engine
+    app_db._engine = None
+    app_db._session_factory = None
+    if engine is not None:
+        await engine.dispose()
 
 
 @pytest_asyncio.fixture

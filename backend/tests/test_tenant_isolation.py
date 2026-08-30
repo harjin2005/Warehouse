@@ -68,3 +68,44 @@ async def test_session_without_tenant_id_set_sees_no_rows(
         async with session.begin():
             result = await session.execute(select(User))
             assert result.scalars().all() == []
+
+
+async def test_tenant_scoped_session_only_sees_own_tenant_registry_row(
+    runtime_engine, raw_session, tenant_a_id, tenant_b_id, monkeypatch
+):
+    """`tenants` (migration 0004) is RLS-scoped on its own `id` column, not a
+    `tenant_id` foreign key -- prove warehouse_runtime can't enumerate other
+    tenants' registry rows, mirroring the `users` isolation tests above."""
+    monkeypatch.setattr(app_db, "_engine", runtime_engine)
+    monkeypatch.setattr(app_db, "_session_factory", None)
+
+    from app.models.tenant import Tenant
+    from sqlalchemy import select
+
+    async with tenant_scoped_session(tenant_a_id) as session:
+        result = await session.execute(select(Tenant))
+        ids = {t.id for t in result.scalars().all()}
+        assert ids == {tenant_a_id}
+
+    async with tenant_scoped_session(tenant_b_id) as session:
+        result = await session.execute(select(Tenant))
+        ids = {t.id for t in result.scalars().all()}
+        assert ids == {tenant_b_id}
+
+
+async def test_session_without_tenant_id_set_sees_no_tenant_rows(
+    runtime_engine, raw_session, tenant_a_id
+):
+    from app.models.tenant import Tenant
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    # Connect as warehouse_runtime with app.tenant_id never set -- a
+    # superuser connection (or a role with BYPASSRLS) would see every
+    # tenant's row regardless; this proves the tenants RLS policy actually
+    # restricts warehouse_runtime.
+    factory = async_sessionmaker(runtime_engine, expire_on_commit=False)
+    async with factory() as session:
+        async with session.begin():
+            result = await session.execute(select(Tenant))
+            assert result.scalars().all() == []

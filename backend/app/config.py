@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     environment: str = "development"
     rls_bypass_role: str = "app_bypass_auth"
 
+    # Password for the `warehouse_runtime` role (migrations/versions/0003_runtime_role.py
+    # reads this, never os.environ directly, so it goes through the same
+    # pydantic-settings validation/precedence as every other setting). The
+    # literal below is a documented dev/test-only default -- every real
+    # environment (anything where `environment` is not "development" or
+    # "test") MUST set RUNTIME_DB_PASSWORD itself. Migration 0003 raises if
+    # it detects this default still in effect outside development/test, so
+    # an unset env var in staging/production fails loudly instead of
+    # silently resetting the role's password to a value visible in git
+    # history.
+    runtime_db_password: str = "warehouse_runtime_dev_password"
+
 
 @lru_cache
 def get_settings() -> Settings:

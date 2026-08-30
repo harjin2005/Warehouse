@@ -59,11 +59,14 @@ FastAPI backend over authenticated HTTPS.
 
 ## Tenant isolation
 
-Shared schema, every table carries `tenant_id`, enforced with Postgres Row-Level Security
-policies set via `SET LOCAL app.tenant_id` on every request (session-scoped, not trusted to
-app-layer `WHERE` clauses). This is the standard, auditable pattern for B2B SaaS at this scale —
-defensible in an enterprise security questionnaire, and migrations stay a single operation
-instead of an N-tenant fan-out.
+Shared schema, every tenant-owned table carries `tenant_id`, enforced with Postgres Row-Level
+Security policies set via `SET LOCAL app.tenant_id` on every request (session-scoped, not
+trusted to app-layer `WHERE` clauses). This is the standard, auditable pattern for B2B SaaS at
+this scale — defensible in an enterprise security questionnaire, and migrations stay a single
+operation instead of an N-tenant fan-out. `tenants` itself has no `tenant_id` column (it's the
+tenant registry, one row per tenant, not a table a tenant owns rows in) but is still
+RLS-protected, scoped on its own `id` column instead — a tenant's session can only see its own
+registry row, not enumerate every other tenant.
 
 **Two DB roles, not one.** Postgres superusers bypass RLS unconditionally, regardless of
 `FORCE ROW LEVEL SECURITY` — so the role the running application connects as must never be a

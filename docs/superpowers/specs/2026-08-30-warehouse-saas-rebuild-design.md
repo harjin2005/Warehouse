@@ -32,13 +32,16 @@ auth, real tenant data isolation, and no secret ever reaching the browser.
 1. Data foundation + deterministic KPI engine (this spec)
 2. Auth + tenant enforcement (this spec)
 3. API + frontend integration (this spec)
-4. Billing/subscription (follow-on spec, after v1 has users to bill)
-5. Enterprise hardening pass — SSO/SAML, audit trail, load test, security review (follow-on spec)
+4. AI agents layer (follow-on spec, after 1–3 land — see "AI agents layer" below for what and why)
+5. Billing/subscription (follow-on spec, after v1 has users to bill)
+6. Enterprise hardening pass — SSO/SAML, audit trail, load test, security review (follow-on spec)
 
 This spec covers 1–3: everything required for a working, secure, deterministic, multi-tenant v1.
 Billing and SSO are deliberately deferred — they're real work but they don't block having a
 correct, sellable core product, and building them before the core is proven would be designing
-for hypothetical scale.
+for hypothetical scale. The AI agents layer (4) is deliberately sequenced *after* the core, not
+before or alongside it: every agent below reasons over KPI/action data that only exists once
+Phases 1–3 are built and running — an agent built first would have nothing real to query.
 
 ## Architecture
 
@@ -134,6 +137,42 @@ FastAPI exposes REST endpoints matching the existing domain shapes: `POST /uploa
 lists) are kept; `services/geminiService.ts` is deleted from the frontend entirely and replaced
 with an API client hitting the FastAPI backend. Auth adds a login screen in front of the existing
 UI.
+
+## AI agents layer (Phase 4 — follow-on spec, not built in this pass)
+
+The original product's own pitch (`metadata.json`: "AI-driven corrective actions"; the GitHub
+repo description: "helping them by providing AI assistant over their own data") already implies
+more than narrative-text generation. Once the deterministic core (1–3) is live, three agentic
+capabilities create real, defensible product value — "agentic" meaning multi-step and tool-using,
+not a single completion call, and every one of them is a read-only reasoner over numbers Python
+already computed, never a replacement for the computation itself:
+
+1. **Conversational data assistant.** A tenant asks a question in plain language ("why did pick
+   accuracy drop in Zone C last week?"); the agent calls read-only, tenant-scoped tool functions
+   against the `kpi_snapshots` / `orders` / `picks` / `inventory` tables (through the same
+   `tenant_scoped_session` every other code path uses — an agent gets no special DB access) and
+   composes an answer from real query results. This is the single most differentiating feature
+   versus a static BI dashboard, and it's what the product was originally pitched as.
+2. **Action recommendation agent.** Today's plan has the rule engine deterministically decide
+   *whether* a threshold breached and generate a static `action_template`. This agent adds
+   judgment on top: given a triggered rule, it reasons over `historical_action_effectiveness`
+   (already in `types.ts` — acceptance rate, execution rate, cumulative KPI improvement per past
+   action) to rank *which* of the known interventions is most likely to work for this specific
+   tenant's history, rather than always proposing the same generic template. The rule engine's
+   trigger/severity/breach math is never touched by this agent — it only re-ranks and annotates
+   an already-computed, already-triggered proposal. Every output remains a `PROPOSED` action
+   requiring human approval before `ACCEPTED`/`EXECUTED` — the existing action-lifecycle state
+   machine already enforces this gate, so the agent changes *which* action is suggested, never
+   whether one gets executed automatically.
+3. **Root-cause drill-down agent.** Given a KPI breach, an agent that iteratively queries the
+   underlying order/pick/inventory rows (read-only, tenant-scoped, same tool-call pattern as #1)
+   to isolate the actual driving segment (e.g. "cycle time degraded specifically for orders over
+   50 units placed after 3pm in Zone B") rather than leaving the operator to dig through raw data
+   themselves. Highest-effort of the three; sequence last within this phase.
+
+All three are additive on top of the deterministic engine, never a dependency of it — the KPI
+numbers, rule evaluations, and action proposals must work correctly with zero LLM involvement
+before any of this phase starts, exactly as Phases 1–3 already specify.
 
 ## Testing
 

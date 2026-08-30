@@ -2,6 +2,7 @@ import uuid
 from typing import Optional
 
 from fastapi import Request
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users import BaseUserManager, UUIDIDMixin, exceptions, schemas
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -21,17 +22,18 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         held only for the duration of that SELECT, then immediately reset.
 
         This is the one deliberate, narrow exception to RLS in the whole
-        codebase, and it has exactly three legitimate callers, all of
-        which need to find a user before the caller's tenant is known:
+        codebase, and it has exactly two direct callers (`get_by_email` and
+        `get`), reached from three legitimate flows, all of which need to
+        find a user before the caller's tenant is known:
 
-        - `get_by_email` -- login (`authenticate()` calls this before any
-          tenant context exists).
+        - `get_by_email` -- login (this class's own `authenticate()`
+          override calls this before any tenant context exists), and
+          registration's cross-tenant duplicate-email check (`create()`,
+          see its docstring).
         - `get` -- JWT token validation (`JWTStrategy.read_token()` calls
           this for every protected request; the token carries a user id,
           not a tenant id, so this is the same chicken-and-egg problem as
           login).
-        - `create` -- registration's cross-tenant duplicate-email check
-          (see its docstring).
 
         No other code path may use this pattern.
         """
@@ -123,6 +125,28 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             if safe
             else user_create.create_update_dict_superuser()
         )
+
+        if safe:
+            # `create_update_dict()` (used whenever `safe=True`, i.e. for
+            # every call from the anonymous `/auth/register` endpoint) only
+            # strips fastapi-users' own built-in fields
+            # (id/is_superuser/is_active/is_verified/oauth_accounts) -- see
+            # the installed `fastapi_users/schemas.py`. It does NOT know
+            # about this app's custom `role` field on `UserCreate`
+            # (app/auth/schemas.py), so an anonymous caller could otherwise
+            # set `{"role": "admin", ...}` in the registration payload and
+            # have it written straight into `users.role` unfiltered -- a
+            # privilege-escalation-at-signup bug. `role` is not currently
+            # checked by any authz path, but every future plan treats
+            # `User.role` as a real trust boundary, so any account created
+            # today must not be pre-escalated. Force it to the safe
+            # default here, ignoring whatever the request body contained.
+            # A privileged/authenticated caller wanting to provision a user
+            # with a non-default role is a separate, authenticated code
+            # path that does not exist yet (`safe=False` is never reached
+            # from any current route) -- not built here, out of scope.
+            user_dict["role"] = "member"
+
         password = user_dict.pop("password")
         user_dict["hashed_password"] = self.password_helper.hash(password)
 
@@ -140,6 +164,59 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         await self.on_after_register(created_user, request)
 
         return created_user
+
+    async def authenticate(
+        self, credentials: OAuth2PasswordRequestForm
+    ) -> Optional[User]:
+        """Authenticate a user by email and password.
+
+        Overridden rather than left to `BaseUserManager.authenticate()`
+        because that base implementation's password-rehash branch
+        (verified against the installed fastapi-users 14.0.0 source,
+        `fastapi_users/manager.py`) calls `self.user_db.update(user, ...)`
+        directly, and `self.user_db` is `None` in this codebase (see
+        `get_user_manager()` in app/auth/backend.py) -- it would raise
+        `AttributeError: 'NoneType' object has no attribute 'update'` the
+        moment a stored hash actually needs upgrading (e.g. after a
+        `PasswordHelper`/Argon2-parameter change makes an existing hash's
+        scheme no longer preferred). This is dormant today only because
+        every test-created hash already matches the current preferred
+        scheme, so the branch never fires in the existing test suite.
+
+        The control flow below is an exact copy of
+        `BaseUserManager.authenticate()` -- same lookup, same
+        timing-attack mitigation on a missing user, same
+        verify-then-maybe-rehash sequence, same return values -- with only
+        the final persistence step changed: the rehashed password is
+        written through `tenant_scoped_session(user.tenant_id)` (the same
+        RLS-satisfying pattern `create()` uses for its insert) instead of
+        the unusable `self.user_db.update()`.
+        """
+        try:
+            user = await self.get_by_email(credentials.username)
+        except exceptions.UserNotExists:
+            # Run the hasher anyway to mitigate a timing attack that would
+            # otherwise let a caller distinguish "no such user" from "wrong
+            # password" by response time (inspired by Django's approach:
+            # https://code.djangoproject.com/ticket/20760), same as the
+            # base implementation.
+            self.password_helper.hash(credentials.password)
+            return None
+
+        verified, updated_password_hash = self.password_helper.verify_and_update(
+            credentials.password, user.hashed_password
+        )
+        if not verified:
+            return None
+
+        if updated_password_hash is not None:
+            async with tenant_scoped_session(user.tenant_id) as session:
+                db_user = await session.get(User, user.id)
+                db_user.hashed_password = updated_password_hash
+                await session.flush()
+            user.hashed_password = updated_password_hash
+
+        return user
 
     async def on_after_register(self, user: User, request: Optional[Request] = None):
         pass

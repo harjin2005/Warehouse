@@ -1,0 +1,30 @@
+name: backend-ci
+
+on:
+  push:
+    paths:
+      - "backend/**"
+  pull_request:
+    paths:
+      - "backend/**"
+
+jobs:
+  test:
+    # ubuntu-latest GitHub-hosted runners ship Docker pre-installed and
+    # running, which the test suite needs: conftest.py's `postgres_container`
+    # fixture spins up a real postgres:16-alpine container via testcontainers
+    # for every test module (RLS behavior cannot be verified against SQLite
+    # -- see backend/README.md). No extra Docker setup step is required here.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run tests
+        run: pytest -v

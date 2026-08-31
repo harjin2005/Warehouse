@@ -27,6 +27,19 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 
+# Explicit, not auto-discovered: `migrations/` (alembic's script_location,
+# never `import migrations`-ed as a package) has no `__init__.py` and sits
+# next to `app/` at the repo root. Depending on the setuptools version
+# resolved at install time, its flat-layout auto-discovery heuristic can
+# either silently ignore `migrations/` (no __init__.py) or hard-fail with
+# "Multiple top-level packages discovered: ['app', 'migrations']" -- this
+# surfaced as a real `pip install -e .` failure inside the Dockerfile's
+# fresh build (a newer setuptools than whatever the existing dev venv had
+# cached). Pinning discovery to `app` only makes the install deterministic
+# regardless of setuptools version, in Docker, CI, or a fresh dev venv.
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

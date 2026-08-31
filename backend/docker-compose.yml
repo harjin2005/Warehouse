@@ -1,0 +1,70 @@
+# Two Postgres roles, not one -- see app/config.py and
+# migrations/versions/0003_runtime_role.py for the full rationale.
+#
+#   warehouse_migrator -- the Postgres container's own bootstrap superuser
+#     (POSTGRES_USER/POSTGRES_PASSWORD below). Used ONLY by `alembic upgrade
+#     head`, which needs CREATE ROLE / ENABLE ROW LEVEL SECURITY privileges.
+#     Never used for ordinary request traffic.
+#
+#   warehouse_runtime -- a plain LOGIN role with no superuser/BYPASSRLS,
+#     created BY migration 0003 (not by this compose file). This is the role
+#     `uvicorn` must connect as, so the RLS policies from migration 0002/0004
+#     actually restrict what it can see. Postgres superusers (which is what
+#     the official image makes POSTGRES_USER) unconditionally bypass RLS, so
+#     if uvicorn connected as warehouse_migrator instead, every RLS policy in
+#     this codebase would be silently decorative.
+#
+# RUNTIME_DB_PASSWORD is interpolated into BOTH `DATABASE_URL` (what uvicorn
+# connects with) and `RUNTIME_DB_PASSWORD` (what migration 0003 reads via
+# Settings to create/alter the warehouse_runtime role) from the same host
+# environment variable with the same default, so the two can never drift
+# apart -- migration 0003 cannot create warehouse_runtime with one password
+# while uvicorn tries to connect with another.
+#
+# Host port 5432 may already be bound by another project's Postgres
+# container on this machine -- this stack maps to 55432 on the host instead
+# to avoid clashing with it. The internal container-to-container port
+# (postgres:5432) is unaffected either way.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: warehouse_migrator
+      POSTGRES_PASSWORD: warehouse_migrator
+      POSTGRES_DB: warehouse
+    ports:
+      - "55432:5432"
+    volumes:
+      - warehouse_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouse_migrator -d warehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Migration connection: warehouse_migrator (superuser-equivalent
+      # bootstrap role) -- alembic upgrade head runs as this.
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://warehouse_migrator:warehouse_migrator@postgres:5432/warehouse
+      # Runtime connection: warehouse_runtime (non-superuser, RLS-subject
+      # role) -- uvicorn serves all real request traffic as this. Password
+      # must match RUNTIME_DB_PASSWORD below exactly.
+      DATABASE_URL: postgresql+asyncpg://warehouse_runtime:${RUNTIME_DB_PASSWORD:-warehouse_runtime_dev_password}@postgres:5432/warehouse
+      # Read by migration 0003 (via Settings) to create/alter the
+      # warehouse_runtime role with this exact password.
+      RUNTIME_DB_PASSWORD: ${RUNTIME_DB_PASSWORD:-warehouse_runtime_dev_password}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  warehouse_pg_data:
